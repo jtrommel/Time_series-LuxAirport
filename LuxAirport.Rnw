@@ -58,6 +58,22 @@
 \SweaveOpts{concordance=TRUE,prefix.string=AL}
 \setkeys{Gin}{width=1.1\marginparwidth} %% Sweave
 
+<<echo=FALSE>>=
+library(tidyverse)
+library(broom)
+library(gridExtra)
+library(lubridate)
+library(forecast)
+library(tsibble)
+library(brotools)
+@
+
+<<echo=FALSE>>=
+ihs <- function(x) {
+  log(x+sqrt(x**2 + 1)) # inverse hyperbolic sine
+}
+@
+
 % Setting the ggplot theme:
 <<echo=FALSE>>=
 JT.theme <- theme(panel.border = element_rect(fill = NA, colour = "gray10"),
@@ -80,33 +96,15 @@ JT.theme <- theme(panel.border = element_rect(fill = NA, colour = "gray10"),
 
 
 \frontmatter
-\chapter*{Easy time-series predicton with R: a tutorial with air traffic data from Lux Airport?}
+\chapter*{Easy time-series predicton with R: a tutorial with air traffic data from Lux Airport}
 
 \mainmatter
 
 \section{Source}
 This worked out example comes from B. Rodrigues's blog ''Econometrics and Free Software" - 14/11/2018 
 
-Libraries:
-<<>>=
-library(tidyverse)
-library(broom)
-library(gridExtra)
-library(lubridate)
-library(forecast)
-library(tsibble)
-library(brotools)
-@
-
-Functions:
-<<>>=
-ihs <- function(x) {
-  log(x+sqrt(x**2 + 1)) # inverse hyperbolic sine
-}
-@
-
-Read data:
-<<>>=
+\subsection{Raw data}
+<<label=rawmonth,fig=TRUE,include=FALSE, echo=FALSE>>=
 avia_clean_quarterly <- read_csv("./Data/avia_clean_quarterly.csv")
 avia_clean_monthly <- read_csv("./Data/avia_clean_monthy.csv")
 avia_clean_monthly %>%
@@ -117,6 +115,106 @@ avia_clean_monthly %>%
   geom_line(aes(y=total, x=date), colour="#82518c") +
   scale_x_date(date_breaks="1 year", date_labels= "%m-%Y")
 @
+
+\begin{figure}
+\includegraphics[width=1\textwidth]{AL-rawmonth}
+\caption{}
+\label{fig:rawmonth}
+\setfloatalignment{b}% forces caption to be bottom-aligned
+\end{figure}
+
+\subsection{Logged data}
+
+Logged data = data after transforming it with the inverted hyperbolic sine transformation:
+
+<<label=loggedmonth,fig=TRUE,include=FALSE, echo=FALSE>>=
+avia_clean_monthly %>%
+  group_by(date) %>%
+  summarise(total = sum(passengers)) %>%
+  mutate(total_ihs = ihs(total)) %>%
+  ggplot() +
+  ggtitle("Logged data") +
+  geom_line(aes(y=total_ihs, x=date), colour="#82518c") +
+  scale_x_date(date_breaks="1 year", date_labels= "%m-%Y")
+@
+
+\begin{figure}
+\includegraphics[width=1\textwidth]{AL-loggedmonth}
+\caption{}
+\label{fig:loggedmonth}
+\setfloatalignment{b}% forces caption to be bottom-aligned
+\end{figure}
+
+\section{Working with time series}
+
+We use the data from before 2015 as out training set and convert the ''passenger" column from data to a time series object with the \textit{ts()}-function.
+
+
+<<echo=FALSE>>=
+avia_clean_train <- avia_clean_monthly %>%
+  select(date, passengers) %>%
+  filter(year(date) < 2015) %>%
+  group_by(date) %>%
+  summarise(total_passengers = sum(passengers)) %>%
+  pull(total_passengers) %>%
+  ts(., frequency = 12, start = c(2005,1))
+@
+
+Transform the data: logging stabilises the variance of the time series.
+<<echo=FALSE>>=
+logged_data <- ihs(avia_clean_train)
+@
+
+<<>>=
+(model_fit <- auto.arima(logged_data))
+@
+
+The result says that the best model would be an ARIMA (2,1,1)(2,1,0)\_(12) which means a seasonal autoregressive model with p=2, d=1, q=1, P=2 and D=1.
+
+We use this model to forecast the next 39 months. The \textit{tsibble}-package converts \emph{time-series-aware}-objects to \emph{time-aware}-objects.
+<<>>=
+model_forecast <- forecast(model_fit, h = 39)
+point_estimate <- model_forecast$mean %>%
+  as_tsibble() %>%
+  rename(point_estimate =  value,
+         date = index)
+upper <- model_forecast$upper %>%
+  as_tsibble() %>%
+  spread(key, value) %>%
+  rename(date =  index,
+         upper80 = `80%`,
+         upper95 = `95%`)
+lower <- model_forecast$lower %>%
+  as_tsibble() %>%
+  spread(key, value) %>%
+  rename(date =  index,
+         lower80 = `80%`,
+         lower95 = `95%`)
+estimated_data <- reduce(list(point_estimate, upper, lower), full_join, by = "date")
+@
+
+<<label=forecast,fig=TRUE,include=FALSE, echo=FALSE>>=
+avia_clean_monthly %>%
+  group_by(date) %>%
+  summarise(total = sum(passengers)) %>%
+  mutate(total_ihs = ihs(total)) %>%
+  ggplot() +
+  ggtitle("Forecast from 2015") +
+  geom_line(aes(y=total_ihs, x=date), colour="#82518c") +
+  scale_x_date(date_breaks="1 year", date_labels= "%m-%Y") +
+  geom_ribbon(data=estimated_data, aes(x=date, ymin= lower95, ymax=upper95), fill="#666018", alpha=0.2) +
+  geom_line(data=estimated_data, aes(x=date, y= point_estimate), linetype=2, colour="#8e9d98") +
+  JT.theme
+@
+
+\begin{figure}
+\includegraphics[width=1\textwidth]{AL-forecast}
+\caption{}
+\label{fig:forecast}
+\setfloatalignment{b}% forces caption to be bottom-aligned
+\end{figure}
+
+The true results lie nicely within the 95\% -confidence interval!
 
 \newpage
 \textbf{Thanks} \\
