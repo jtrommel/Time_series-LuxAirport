@@ -65,13 +65,8 @@ library(gridExtra)
 library(lubridate)
 library(forecast)
 library(tsibble)
+library(furrr)
 library(brotools)
-@
-
-<<echo=FALSE>>=
-ihs <- function(x) {
-  log(x+sqrt(x**2 + 1)) # inverse hyperbolic sine
-}
 @
 
 % Setting the ggplot theme:
@@ -93,7 +88,33 @@ JT.theme <- theme(panel.border = element_rect(fill = NA, colour = "gray10"),
 @
 
 % Functions
+<<echo=FALSE>>=
+ihs <- function(x) {
+  log(x+sqrt(x**2 + 1)) # inverse hyperbolic sine
+}
+@
 
+<<echo=FALSE>>=
+to_tibble = function(forecast_object) {
+point_estimate <- forecast_object$mean %>%
+  as_tsibble() %>%
+  rename(point_estimate =  value,
+         date = index)
+upper <- forecast_object$upper %>%
+  as_tsibble() %>%
+  spread(key, value) %>%
+  rename(date =  index,
+         upper80 = `80%`,
+         upper95 = `95%`)
+lower <- forecast_object$lower %>%
+  as_tsibble() %>%
+  spread(key, value) %>%
+  rename(date =  index,
+         lower80 = `80%`,
+         lower95 = `95%`)
+reduce(list(point_estimate, upper, lower), full_join, by = "date")
+}
+@
 
 \frontmatter
 \chapter*{Easy time-series predicton with R: a tutorial with air traffic data from Lux Airport}
@@ -149,11 +170,17 @@ avia_clean_monthly %>%
 
 We use the data from before 2015 as out training set and convert the ''passenger" column from data to a time series object with the \textit{ts()}-function.
 
-
 <<echo=FALSE>>=
 avia_clean_train <- avia_clean_monthly %>%
   select(date, passengers) %>%
   filter(year(date) < 2015) %>%
+  group_by(date) %>%
+  summarise(total_passengers = sum(passengers)) %>%
+  pull(total_passengers) %>%
+  ts(., frequency = 12, start = c(2005,1))
+avia_clean_test <- avia_clean_monthly %>%
+  select(date, passengers) %>%
+  filter(year(date) >= 2015) %>%
   group_by(date) %>%
   summarise(total_passengers = sum(passengers)) %>%
   pull(total_passengers) %>%
@@ -174,23 +201,7 @@ The result says that the best model would be an ARIMA (2,1,1)(2,1,0)\_(12) which
 We use this model to forecast the next 39 months. The \textit{tsibble}-package converts \emph{time-series-aware}-objects to \emph{time-aware}-objects.
 <<>>=
 model_forecast <- forecast(model_fit, h = 39)
-point_estimate <- model_forecast$mean %>%
-  as_tsibble() %>%
-  rename(point_estimate =  value,
-         date = index)
-upper <- model_forecast$upper %>%
-  as_tsibble() %>%
-  spread(key, value) %>%
-  rename(date =  index,
-         upper80 = `80%`,
-         upper95 = `95%`)
-lower <- model_forecast$lower %>%
-  as_tsibble() %>%
-  spread(key, value) %>%
-  rename(date =  index,
-         lower80 = `80%`,
-         lower95 = `95%`)
-estimated_data <- reduce(list(point_estimate, upper, lower), full_join, by = "date")
+estimated_data <- to_tibble(model_forecast)
 @
 
 <<label=forecast,fig=TRUE,include=FALSE, echo=FALSE>>=
@@ -216,6 +227,21 @@ avia_clean_monthly %>%
 
 The true results lie nicely within the 95\% -confidence interval!
 
+\section{Part 2: Searching for optimal hyper-parameters}
+
+In Arima you have to specify 7 hyper-parameters:
+
+\begin{itemize}
+  \item 3 trend hyper-parameters called p, d and q
+  \item 4 seasonal hyper-parameters called P, D, Q and S
+\end{itemize}
+
+Box and Jenkins described the meaning of these parameters in ''Time Series Analysis". Here the author uses a brute force method: he tests them all and picks the one with the lowst RMSE value.
+
+
+<<echo=FALSE>>=
+logged_train.data <- ihs(avia_clean_train)
+@
 \newpage
 \textbf{Thanks} \\
 \medskip
